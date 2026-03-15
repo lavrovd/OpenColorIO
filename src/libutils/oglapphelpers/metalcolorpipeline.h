@@ -23,7 +23,7 @@ enum WorkingSpace
     WORKING_SPACE_ACESCCT
 };
 
-/// Camera / input encoding.  This is the only thing the user picks.
+/// Camera / input encoding.  The only thing the user selects.
 enum InputEncoding
 {
     INPUT_SLOG3_SGAMUT3CINE = 0,   ///< Sony S-Log3 / S-Gamut3.Cine
@@ -35,41 +35,50 @@ enum InputEncoding
     INPUT_LINEAR_SRGB              ///< sRGB / Rec.709 linear (e.g. PNG assets)
 };
 
+/// Color space of the pixels that FCP delivers to the plugin.
+/// Derived from the host — not user-selectable.
+enum HostColorSpace
+{
+    HOST_REC709 = 0,               ///< Rec.709 / sRGB (SDR timeline)
+    HOST_REC2020                   ///< Rec.2020 (Wide Gamut / HDR timeline)
+};
+
 /**
- * \brief High-level Metal color pipeline that hides OCIO internals.
+ * \brief High-level Metal color pipeline for FxPlug4 plugins.
  *
- * The user only selects the camera / input encoding (IDT).  The output
- * transform is derived automatically: after grading the plugin converts
- * back to the same color space the input arrived in, so the host's own
- * display pipeline (viewer LUT, monitor profile, etc.) stays in control.
+ * FCP decodes the media and delivers pixels to the plugin in Rec.709
+ * or Rec.2020 (non-linearized).  The user's only choice is the camera
+ * IDT.  The output transform converts back to the host color space
+ * so FCP's display pipeline stays in control.
  *
- * Typical usage:
+ * Typical usage in a FxPlug4 plugin:
  * \code
- *   // One-time setup — user picks camera format only.
+ *   // Setup — user picked camera, host tells us Rec.709 or Rec.2020.
  *   auto pipeline = MetalColorPipeline::Create(mtlDevice,
  *                                              WORKING_SPACE_ACESCCT,
- *                                              INPUT_SLOG3_SGAMUT3CINE);
+ *                                              INPUT_SLOG3_SGAMUT3CINE,
+ *                                              HOST_REC709);
  *
- *   // Build GPU shaders (cache the results, rebuild only when IDT changes):
- *   auto idtShader     = pipeline->getIDTShader();      // input → working
- *   auto inverseShader = pipeline->getInverseIDTShader(); // working → input
+ *   // Build GPU shaders (cache; rebuild when IDT or host space changes):
+ *   auto idtShader = pipeline->getIDTShader();       // camera → working
+ *   auto outShader = pipeline->getOutputShader();     // working → host
  *
- *   // For CIFilters that need linear input, sandwich them:
- *   auto toLinShader   = pipeline->getToLinearShader();   // working → ACEScg
- *   auto fromLinShader = pipeline->getFromLinearShader(); // ACEScg → working
+ *   // For CIFilters that need linear light:
+ *   auto toLinShader   = pipeline->getToLinearShader();
+ *   auto fromLinShader = pipeline->getFromLinearShader();
  *
  *   // Feed each GpuShaderDescRcPtr into MetalBuilder::Create().
  * \endcode
  *
- * Pipeline for a plugin render pass:
- *   input pixels (camera space)
+ * Full render-pass pipeline:
+ *   FCP pixels (Rec.709 or Rec.2020)
  *     → IDT shader (camera → working space)
  *       → [grade / CIFilter chain in working space]
- *     → inverse IDT shader (working space → camera space)
- *   output pixels (same space the host sent — host handles display)
+ *     → output shader (working space → Rec.709 or Rec.2020)
+ *   return to FCP (host handles display)
  *
- * The "to/from linear" shaders are only needed when the working space is
- * non-linear (ACEScct).  For ACEScg they compile to identity (no-op).
+ * The "to/from linear" shaders are only needed when the working space
+ * is non-linear (ACEScct).  For ACEScg they compile to identity.
  */
 class MetalColorPipeline
 {
@@ -78,16 +87,25 @@ public:
     MetalColorPipeline(const MetalColorPipeline &) = delete;
     MetalColorPipeline & operator=(const MetalColorPipeline &) = delete;
 
-    /// Create a pipeline.  User picks working space and camera format.
+    /// Create a pipeline.
+    /// @param device        Metal device.
+    /// @param workingSpace  Internal grading space (ACEScg or ACEScct).
+    /// @param input         Camera encoding — the user picks this.
+    /// @param hostSpace     What FCP delivered — derived from the host.
     static MetalColorPipelineRcPtr Create(id<MTLDevice> device,
                                           WorkingSpace workingSpace,
-                                          InputEncoding input);
+                                          InputEncoding input,
+                                          HostColorSpace hostSpace);
 
-    /// Change the camera / input encoding (rebuilds IDT processors).
+    /// Change the camera / input encoding (rebuilds IDT shader).
     void setInputEncoding(InputEncoding input);
     InputEncoding getInputEncoding() const;
 
-    /// Change working space (rebuilds all processors).
+    /// Change the host color space (rebuilds output shader).
+    void setHostColorSpace(HostColorSpace hs);
+    HostColorSpace getHostColorSpace() const;
+
+    /// Change working space (rebuilds all shaders).
     void setWorkingSpace(WorkingSpace ws);
     WorkingSpace getWorkingSpace() const;
 
@@ -95,34 +113,37 @@ public:
     //  GPU shader descriptors — feed these into MetalBuilder::Create()
     // -----------------------------------------------------------------
 
-    /// Input (camera) → working space.
+    /// Camera → working space (IDT).
+    /// User-selected camera encoding to internal grading space.
     GpuShaderDescRcPtr getIDTShader() const;
 
-    /// Working space → input (camera).  Returns pixels in the same
-    /// color space the host originally sent, so the host's display
-    /// pipeline sees the correct data.
-    GpuShaderDescRcPtr getInverseIDTShader() const;
+    /// Working space → host color space (output).
+    /// Converts graded pixels back to whatever FCP expects (Rec.709
+    /// or Rec.2020).  Derived automatically — not user-selectable.
+    GpuShaderDescRcPtr getOutputShader() const;
 
-    /// Working space → ACEScg (linearize for filters that need it).
-    /// Compiles to identity when working space is already ACEScg.
+    /// Working space → ACEScg (linearize for CIFilters).
+    /// Identity when working space is already ACEScg.
     GpuShaderDescRcPtr getToLinearShader() const;
 
-    /// ACEScg → working space (de-linearize after linear filters).
-    /// Compiles to identity when working space is already ACEScg.
+    /// ACEScg → working space (de-linearize after CIFilters).
+    /// Identity when working space is already ACEScg.
     GpuShaderDescRcPtr getFromLinearShader() const;
 
-    /// Direct access to the underlying OCIO config (escape hatch).
+    /// Direct access to the underlying OCIO config.
     ConstConfigRcPtr getConfig() const;
 
     ~MetalColorPipeline();
 
 private:
-    MetalColorPipeline(id<MTLDevice> device, WorkingSpace ws, InputEncoding input);
+    MetalColorPipeline(id<MTLDevice> device, WorkingSpace ws,
+                       InputEncoding input, HostColorSpace hostSpace);
 
     GpuShaderDescRcPtr buildShader(ConstProcessorRcPtr proc) const;
 
     static const char * workingSpaceName(WorkingSpace ws);
     static const char * inputEncodingName(InputEncoding input);
+    static const char * hostColorSpaceName(HostColorSpace hs);
 
     struct Impl;
     Impl * m_impl;

@@ -17,6 +17,7 @@ struct MetalColorPipeline::Impl
     id<MTLDevice>    device;
     WorkingSpace     workingSpace;
     InputEncoding    inputEncoding;
+    HostColorSpace   hostColorSpace;
     ConstConfigRcPtr config;
 };
 
@@ -49,26 +50,40 @@ const char * MetalColorPipeline::inputEncodingName(InputEncoding input)
     throw Exception("Unknown InputEncoding value.");
 }
 
+const char * MetalColorPipeline::hostColorSpaceName(HostColorSpace hs)
+{
+    switch (hs)
+    {
+        case HOST_REC709:   return "Rec.1886 Rec.709 - Display";
+        case HOST_REC2020:  return "Rec.1886 Rec.2020 - Display";
+    }
+    throw Exception("Unknown HostColorSpace value.");
+}
+
 // ---------------------------------------------------------------------------
 //  Construction
 // ---------------------------------------------------------------------------
 
 MetalColorPipelineRcPtr MetalColorPipeline::Create(id<MTLDevice> device,
                                                     WorkingSpace workingSpace,
-                                                    InputEncoding input)
+                                                    InputEncoding input,
+                                                    HostColorSpace hostSpace)
 {
-    return MetalColorPipelineRcPtr(new MetalColorPipeline(device, workingSpace, input));
+    return MetalColorPipelineRcPtr(
+        new MetalColorPipeline(device, workingSpace, input, hostSpace));
 }
 
 MetalColorPipeline::MetalColorPipeline(id<MTLDevice> device,
                                        WorkingSpace ws,
-                                       InputEncoding input)
+                                       InputEncoding input,
+                                       HostColorSpace hostSpace)
     : m_impl(new Impl)
 {
-    m_impl->device        = device;
-    m_impl->workingSpace  = ws;
-    m_impl->inputEncoding = input;
-    m_impl->config        = Config::CreateFromBuiltinConfig(kBuiltinConfig);
+    m_impl->device         = device;
+    m_impl->workingSpace   = ws;
+    m_impl->inputEncoding  = input;
+    m_impl->hostColorSpace = hostSpace;
+    m_impl->config         = Config::CreateFromBuiltinConfig(kBuiltinConfig);
 }
 
 MetalColorPipeline::~MetalColorPipeline()
@@ -88,6 +103,16 @@ void MetalColorPipeline::setInputEncoding(InputEncoding input)
 InputEncoding MetalColorPipeline::getInputEncoding() const
 {
     return m_impl->inputEncoding;
+}
+
+void MetalColorPipeline::setHostColorSpace(HostColorSpace hs)
+{
+    m_impl->hostColorSpace = hs;
+}
+
+HostColorSpace MetalColorPipeline::getHostColorSpace() const
+{
+    return m_impl->hostColorSpace;
 }
 
 void MetalColorPipeline::setWorkingSpace(WorkingSpace ws)
@@ -121,7 +146,7 @@ GpuShaderDescRcPtr MetalColorPipeline::buildShader(ConstProcessorRcPtr proc) con
 }
 
 // ---------------------------------------------------------------------------
-//  IDT:  input → working space
+//  IDT:  camera → working space
 // ---------------------------------------------------------------------------
 
 GpuShaderDescRcPtr MetalColorPipeline::getIDTShader() const
@@ -134,13 +159,13 @@ GpuShaderDescRcPtr MetalColorPipeline::getIDTShader() const
 }
 
 // ---------------------------------------------------------------------------
-//  Inverse IDT:  working space → input (return to host)
+//  Output:  working space → host color space (Rec.709 or Rec.2020)
 // ---------------------------------------------------------------------------
 
-GpuShaderDescRcPtr MetalColorPipeline::getInverseIDTShader() const
+GpuShaderDescRcPtr MetalColorPipeline::getOutputShader() const
 {
     const char * src = workingSpaceName(m_impl->workingSpace);
-    const char * dst = inputEncodingName(m_impl->inputEncoding);
+    const char * dst = hostColorSpaceName(m_impl->hostColorSpace);
 
     auto proc = m_impl->config->getProcessor(src, dst);
     return buildShader(proc);
