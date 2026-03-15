@@ -9,19 +9,19 @@
 namespace OCIO_NAMESPACE
 {
 
-// Use the studio config — it has camera IDTs (Sony, ARRI, RED, Panasonic, etc.)
-// The CG config only has output color spaces.
+// Studio config has camera IDTs (Sony, ARRI, RED, Panasonic, etc.)
 static constexpr const char * kBuiltinConfig = "ocio://studio-config-latest";
 
 struct MetalColorPipeline::Impl
 {
     id<MTLDevice>    device;
     WorkingSpace     workingSpace;
+    InputEncoding    inputEncoding;
     ConstConfigRcPtr config;
 };
 
 // ---------------------------------------------------------------------------
-//  Name mapping
+//  Name mapping — all OCIO string knowledge lives here
 // ---------------------------------------------------------------------------
 
 const char * MetalColorPipeline::workingSpaceName(WorkingSpace ws)
@@ -49,48 +49,26 @@ const char * MetalColorPipeline::inputEncodingName(InputEncoding input)
     throw Exception("Unknown InputEncoding value.");
 }
 
-void MetalColorPipeline::displayTargetNames(DisplayTarget dt,
-                                             const char *& displayName,
-                                             const char *& viewName)
-{
-    switch (dt)
-    {
-        case DISPLAY_SDR_sRGB:
-            displayName = "sRGB - Display";
-            viewName    = "ACES 2.0 - SDR 100 nits (Rec.709)";
-            return;
-        case DISPLAY_SDR_P3:
-            displayName = "Display P3 - Display";
-            viewName    = "ACES 2.0 - SDR 100 nits (P3 D65)";
-            return;
-        case DISPLAY_HDR_1000_P3:
-            displayName = "Display P3 HDR - Display";
-            viewName    = "ACES 2.0 - HDR 1000 nits (P3 D65)";
-            return;
-        case DISPLAY_HDR_1000_REC2020:
-            displayName = "Rec.2100-PQ - Display";
-            viewName    = "ACES 2.0 - HDR 1000 nits (Rec.2020)";
-            return;
-    }
-    throw Exception("Unknown DisplayTarget value.");
-}
-
 // ---------------------------------------------------------------------------
 //  Construction
 // ---------------------------------------------------------------------------
 
 MetalColorPipelineRcPtr MetalColorPipeline::Create(id<MTLDevice> device,
-                                                    WorkingSpace workingSpace)
+                                                    WorkingSpace workingSpace,
+                                                    InputEncoding input)
 {
-    return MetalColorPipelineRcPtr(new MetalColorPipeline(device, workingSpace));
+    return MetalColorPipelineRcPtr(new MetalColorPipeline(device, workingSpace, input));
 }
 
-MetalColorPipeline::MetalColorPipeline(id<MTLDevice> device, WorkingSpace ws)
+MetalColorPipeline::MetalColorPipeline(id<MTLDevice> device,
+                                       WorkingSpace ws,
+                                       InputEncoding input)
     : m_impl(new Impl)
 {
-    m_impl->device       = device;
-    m_impl->workingSpace = ws;
-    m_impl->config       = Config::CreateFromBuiltinConfig(kBuiltinConfig);
+    m_impl->device        = device;
+    m_impl->workingSpace  = ws;
+    m_impl->inputEncoding = input;
+    m_impl->config        = Config::CreateFromBuiltinConfig(kBuiltinConfig);
 }
 
 MetalColorPipeline::~MetalColorPipeline()
@@ -101,6 +79,16 @@ MetalColorPipeline::~MetalColorPipeline()
 // ---------------------------------------------------------------------------
 //  Accessors
 // ---------------------------------------------------------------------------
+
+void MetalColorPipeline::setInputEncoding(InputEncoding input)
+{
+    m_impl->inputEncoding = input;
+}
+
+InputEncoding MetalColorPipeline::getInputEncoding() const
+{
+    return m_impl->inputEncoding;
+}
 
 void MetalColorPipeline::setWorkingSpace(WorkingSpace ws)
 {
@@ -133,12 +121,12 @@ GpuShaderDescRcPtr MetalColorPipeline::buildShader(ConstProcessorRcPtr proc) con
 }
 
 // ---------------------------------------------------------------------------
-//  IDT:  input encoding → working space
+//  IDT:  input → working space
 // ---------------------------------------------------------------------------
 
-GpuShaderDescRcPtr MetalColorPipeline::getIDTShader(InputEncoding input) const
+GpuShaderDescRcPtr MetalColorPipeline::getIDTShader() const
 {
-    const char * src = inputEncodingName(input);
+    const char * src = inputEncodingName(m_impl->inputEncoding);
     const char * dst = workingSpaceName(m_impl->workingSpace);
 
     auto proc = m_impl->config->getProcessor(src, dst);
@@ -146,38 +134,26 @@ GpuShaderDescRcPtr MetalColorPipeline::getIDTShader(InputEncoding input) const
 }
 
 // ---------------------------------------------------------------------------
-//  ODT:  working space → display
+//  Inverse IDT:  working space → input (return to host)
 // ---------------------------------------------------------------------------
 
-GpuShaderDescRcPtr MetalColorPipeline::getODTShader(DisplayTarget display) const
+GpuShaderDescRcPtr MetalColorPipeline::getInverseIDTShader() const
 {
-    const char * displayName = nullptr;
-    const char * viewName    = nullptr;
-    displayTargetNames(display, displayName, viewName);
+    const char * src = workingSpaceName(m_impl->workingSpace);
+    const char * dst = inputEncodingName(m_impl->inputEncoding);
 
-    const char * ws = workingSpaceName(m_impl->workingSpace);
-
-    // DisplayViewHelpers adds exposure/contrast dynamic properties automatically.
-    auto proc = DisplayViewHelpers::GetProcessor(
-        m_impl->config,
-        ws,
-        displayName,
-        viewName,
-        MatrixTransform::Create(),  // identity channel view
-        TRANSFORM_DIR_FORWARD);
-
+    auto proc = m_impl->config->getProcessor(src, dst);
     return buildShader(proc);
 }
 
 // ---------------------------------------------------------------------------
-//  Linearize / de-linearize (ACEScct ↔ ACEScg)
+//  Linearize / de-linearize  (working space ↔ ACEScg)
 // ---------------------------------------------------------------------------
 
 GpuShaderDescRcPtr MetalColorPipeline::getToLinearShader() const
 {
     const char * ws = workingSpaceName(m_impl->workingSpace);
 
-    // working space → ACEScg  (identity when already ACEScg)
     auto proc = m_impl->config->getProcessor(ws, "ACEScg");
     return buildShader(proc);
 }
@@ -186,7 +162,6 @@ GpuShaderDescRcPtr MetalColorPipeline::getFromLinearShader() const
 {
     const char * ws = workingSpaceName(m_impl->workingSpace);
 
-    // ACEScg → working space  (identity when already ACEScg)
     auto proc = m_impl->config->getProcessor("ACEScg", ws);
     return buildShader(proc);
 }
