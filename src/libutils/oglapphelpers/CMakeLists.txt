@@ -21,12 +21,14 @@ if(APPLE)
         msl.mm
         mtltexture.mm
         metalapp.mm
+        metalcolorpipeline.mm
     )
 
     list(APPEND INCLUDES
         msl.h
         mtltexture.h
         metalapp.h
+        metalcolorpipeline.h
     )
 
 endif()
